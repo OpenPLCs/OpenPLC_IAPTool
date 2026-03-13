@@ -1,0 +1,13 @@
+{
+  "BaudRate": 115200,
+  "Parity": 0,
+  "DataBits": 8,
+  "StopBits": 0,
+  "ReadTimeout": 0,
+  "uid": "",
+  "ip": "",
+  "mac": "",
+  "udp_port": "16861",
+  "tcp_port": "8247",
+  "reboot_wait_seconds": 4
+}

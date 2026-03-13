@@ -1,0 +1,7 @@
+{
+    "_comment" : "StopBits : 0 - OneStopBit 1 - OnePointFiveStopBits 2 -TwoStopBits",
+    "BaudRate": 115200,
+    "Parity":0,
+    "DataBits":8,
+    "StopBits":0
+}
