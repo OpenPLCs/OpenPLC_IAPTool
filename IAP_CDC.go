@@ -24,22 +24,22 @@ func openPort(comName string, baudRate int) (serial.Port, error) {
 }
 
 // Retry logic for opening serial port
-func retryOpenPort(comName string, baudRate int, maxRetries int) serial.Port {
-	var port serial.Port
-	var err error
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		time.Sleep(2 * time.Second)
-		port, err = openPort(comName, baudRate)
-		if err == nil {
-			logf("Successfully opened port on attempt %d", attempt)
-			return port
-		}
-		logf("Failed to open port %s on attempt %d of %d. Retrying in 2 seconds...", comName, attempt, maxRetries)
-
-	}
-	logf(true, "Failed to open serial port %s after %d attempts", comName, maxRetries)
-	return nil
-}
+// func retryOpenPort(comName string, baudRate int, maxRetries int) serial.Port {
+// 	var port serial.Port
+// 	var err error
+// 	for attempt := 1; attempt <= maxRetries; attempt++ {
+// 		time.Sleep(2 * time.Second)
+// 		port, err = openPort(comName, baudRate)
+// 		if err == nil {
+// 			logf("Successfully opened port on attempt %d", attempt)
+// 			return port
+// 		}
+// 		logf("Failed to open port %s on attempt %d of %d. Retrying in 2 seconds...", comName, attempt, maxRetries)
+//
+// 	}
+// 	logf(true, "Failed to open serial port %s after %d attempts", comName, maxRetries)
+// 	return nil
+// }
 
 func RunCDC(portName, filePath string) {
 	logf("Trying to switch to Upload Mod in CDC...")

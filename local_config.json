@@ -4,7 +4,6 @@
   "DataBits": 8,
   "StopBits": 0,
   "ReadTimeout": 0,
-  "uid": "",
   "ip": "",
   "mac": "",
   "udp_port": "16861",
