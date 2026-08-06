@@ -17,22 +17,20 @@ import (
 const (
 	Buf_b = 8 * 1024 // big buffer ( KB)
 	Buf_s = 1024     // smnall buffer
-	// local_ip_file = "server_ip.txt" // unused legacy cache file
-	//ConfigFile    = "sp_setting_default.json" // Default config file
 
-	CM_Flash  = "flash"                    // Flash command
-	CM_PullIP = "openplc_server_where_r_y" // command to get server IP
-	CM_Reboot = "openplc_server_reboot"    //command to reboot server
-	CM_Ping   = "ping"                     // Ping command
-	// Rsp_Pong  = "pong"                     // Pong response
-	Rsp_OK = "OK"
+	CM_Flash           = "flash"                           // Flash command
+	CM_PullIP          = "openplc_server_where_r_y"        // command to get server IP
+	CM_Reboot          = "openplc_server_reboot"           //command to reboot server
+	CM_RebootChallenge = "openplc_server_reboot_challenge" // request a nonce before CM_Reboot
+	CM_Ping            = "ping"                            // Ping command
+	CM_AuthChallenge   = "authchallenge"                   // request a nonce before CM_Flash
+	CM_GetVersion      = "getversion"                      // ask device for its currently-installed firmware version
+	Rsp_OK             = "OK"
 
 	PingTimeout = 2 * time.Second // Ping response timeout
 	Timeout     = 5 * time.Second // delay
 	MagicBaud   = 1200            // Baud rate to reset PLC
 	MaxRetries  = 3               // Maximum retry attempts for ping and port opening
-	// s_tcp_port  = "8247"
-	s_udp_port = "12345"
 )
 
 const configFile = "local_config.json"
@@ -41,43 +39,14 @@ const defaultBaudRate = 115200
 const defaultParity = 0
 const defaultDataBits = 8
 const defaultStopBits = 0
-const defaultUDPPort = "16861"
-const defaultTCPPort = "8247"
-const defaultRebootWaitSeconds = 5
+const defaultServerPort = "56865"
+const defaultRebootWaitSeconds = 4
 
 // Mode constants
 const (
 	ModeCDC   = "cdc"
 	ModeEther = "ether"
 )
-
-// Command line arguments
-type Args struct {
-	Mode     string
-	Port     string // For CDC mode
-	FilePath string
-}
-
-// Parse command line arguments
-func ParseArgs() Args {
-	if len(os.Args) < 3 {
-		logf(true, "Usage: program <mode> <file_path> [port]")
-	}
-
-	args := Args{
-		Mode:     strings.ToLower(os.Args[1]),
-		FilePath: os.Args[2],
-	}
-
-	if args.Mode == ModeCDC {
-		if len(os.Args) < 4 {
-			logf(true, "CDC mode requires port name. Usage: program cdc <file_path> <port>")
-		}
-		args.Port = os.Args[3]
-	}
-
-	return args
-}
 
 func logf(args ...any) {
 	if len(args) == 0 {
@@ -141,6 +110,30 @@ func ReadResponse(port serial.Port, expected string, timeout time.Duration) bool
 	return false
 }
 
+// SendCommandReadResponse sends a command and returns whatever the device
+// replies with (trimmed), rather than checking against a specific expected
+// string. Used for reading back the nonce from an "authchallenge" request.
+func SendCommandReadResponse(port serial.Port, command string, timeout time.Duration) (string, error) {
+	if _, err := port.Write([]byte(command)); err != nil {
+		return "", fmt.Errorf("failed to send command %q: %v", command, err)
+	}
+	logf("Send command: %s", command)
+
+	port.SetReadTimeout(timeout)
+	response := make([]byte, 256)
+	start := time.Now()
+	for time.Since(start) < timeout {
+		n, err := port.Read(response)
+		if err != nil {
+			return "", fmt.Errorf("error reading from serial port: %v", err)
+		}
+		if n > 0 {
+			return strings.TrimSpace(string(response[:n])), nil
+		}
+	}
+	return "", fmt.Errorf("timeout waiting for response to %q", command)
+}
+
 func SendFile(port serial.Port, file io.Reader, fileSize int64) error {
 	logf("Starting file transfer...")
 	buffer := make([]byte, Buf_b) //
@@ -199,10 +192,11 @@ func LoadConfig() {
 		Parity:            defaultParity,
 		DataBits:          defaultDataBits,
 		StopBits:          defaultStopBits,
-		IP:                "",
+		UID:               "",
+		BootIP:            "",
+		AppIP:             "",
 		MAC:               defaultMAC,
-		UDPPort:           defaultUDPPort,
-		TCPPort:           defaultTCPPort,
+		ServerPort:        defaultServerPort,
 		RebootWaitSeconds: defaultRebootWaitSeconds,
 	}
 
@@ -210,8 +204,17 @@ func LoadConfig() {
 	if err != nil {
 		logf("Config not found, using default MAC...")
 	} else {
-		err = json.Unmarshal(jsonFile, &l_config)
+		var raw struct {
+			LocalConfig
+			LegacyIP string `json:"ip"`
+		}
+		raw.LocalConfig = l_config
+		err = json.Unmarshal(jsonFile, &raw)
 		logf(err, "Failed to parse JSON config")
+		l_config = raw.LocalConfig
+		if l_config.BootIP == "" && l_config.AppIP == "" && strings.TrimSpace(raw.LegacyIP) != "" {
+			l_config.AppIP = strings.TrimSpace(raw.LegacyIP)
+		}
 	}
 }
 
@@ -222,110 +225,3 @@ func SaveConfig() error {
 	}
 	return os.WriteFile(GetLocalConfigPath(), data, 0644)
 }
-
-// func GetLocalCIDRs() ([]string, error) {
-// 	var cidrs []string
-// 	ifaces, err := net.Interfaces()
-// 	if err != nil {
-// 		return nil, err
-// 	}
-//
-// 	for _, iface := range ifaces {
-// 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-// 			continue
-// 		}
-// 		// Filter only WiFi or Ethernet interfaces
-// 		if !isWiFiOrEthernet(iface.Name) {
-// 			continue
-// 		}
-// 		if !isPhysicalDeviceLinux(iface.Name) {
-// 			continue
-// 		}
-//
-// 		addrs, _ := iface.Addrs()
-// 		for _, addr := range addrs {
-// 			ipNet, ok := addr.(*net.IPNet)
-// 			if ok && ipNet.IP.To4() != nil && !ipNet.IP.IsLoopback() {
-// 				//Assume net mask of phiysical ethernet interface is less than or equal to 24
-// 				ones, _ := ipNet.Mask.Size()
-// 				if ones <= 24 {
-// 					cidrs = append(cidrs, ipNet.String())
-// 				}
-// 			}
-// 		}
-// 	}
-// 	return cidrs, nil
-// }
-
-// get the broadcast address of the local network
-// func getBroadcastAddress() (string, error) {
-// 	ifaces, err := net.Interfaces()
-// 	if err != nil {
-// 		return "", err
-// 	}
-//
-// 	for _, iface := range ifaces {
-// 		// Skip down or loopback interfaces
-// 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-// 			continue
-// 		}
-//
-// 		// Filter only WiFi or Ethernet interfaces
-// 		if !isWiFiOrEthernet(iface.Name) {
-// 			continue
-// 		}
-// 		if !isPhysicalDeviceLinux(iface.Name) {
-// 			continue
-// 		}
-// 		addrs, err := iface.Addrs()
-// 		if err != nil {
-// 			continue
-// 		}
-//
-// 		for _, addr := range addrs {
-// 			ipNet, ok := addr.(*net.IPNet)
-// 			if !ok || ipNet.IP == nil || ipNet.IP.To4() == nil {
-// 				continue
-// 			}
-//
-// 			ip := ipNet.IP.To4()
-// 			mask := ipNet.Mask
-//
-// 			broadcast := make(net.IP, 4)
-// 			for i := 0; i < 4; i++ {
-// 				broadcast[i] = ip[i] | ^mask[i]
-// 			}
-//
-// 			return broadcast.String(), nil
-// 		}
-// 	}
-//
-// 	return "", fmt.Errorf("no suitable interface found")
-// }
-
-// Check if the interface name indicates WiFi or Ethernet
-// func isWiFiOrEthernet(name string) bool {
-// 	name = strings.ToLower(name)
-// 	//
-// 	virtualKeywords := []string{"vmnet", "vmware", "vbox", "docker", "br-", "veth", "virbr", "tap", "tun", "zt", "tailscale", "ts", "wsl", "utun", "nat", "loopback"}
-// 	for _, keyword := range virtualKeywords {
-// 		if strings.Contains(name, keyword) {
-// 			return false
-// 		}
-// 	}
-// 	// Match common keywords for WiFi or Ethernet
-// 	return strings.Contains(name, "eth") || // Linux Ethernet: eth0
-// 		strings.HasPrefix(name, "en") || // macOS Ethernet: en0
-// 		strings.Contains(name, "wlan") || // Linux WiFi: wlan0
-// 		strings.Contains(name, "wi-fi") || // Windows WiFi: Wi-Fi
-// 		strings.Contains(name, "wifi") // Alternative spellings
-// }
-
-// Check for physical network device on Linux
-// func isPhysicalDeviceLinux(name string) bool {
-// 	if runtime.GOOS != "linux" {
-// 		return true // For non-Linux, assume true
-// 	}
-// 	_, err := os.Stat("/sys/class/net/" + name + "/device")
-// 	return err == nil
-// }

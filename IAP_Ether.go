@@ -16,61 +16,84 @@ const (
 )
 
 type boardInfo struct {
-	IP  string
-	MAC string
+	UID     string
+	IP      string
+	Role    string
+	Version string
+	Raw     string
 }
 
-func RunEtherUpgrade(filePath string) {
-	logf("[PATH] start ether upgrade flow")
+const bootloaderDiscoveryRetries = 3
 
-	if strings.TrimSpace(l_config.IP) == "" {
-		logf("[PATH] cache miss -> discover")
-		boards, err := discoverBoardsViaDirectedBroadcast()
-		logf(err, "No board reply from UDP broadcast discovery")
+func RunEtherUpgrade(filePath, ip string) {
+	logf("[PATH] start ether upgrade flow, target=%s", ip)
 
-		selected, err := selectBoardAfterDiscovery(boards)
-		logf(err, "Discovery returned multiple devices. Please configure local_config.json and retry")
-		cacheBoardSelection(selected)
-	} else {
-		logf("[PATH] cache hit -> use ip=%s mac=%s", l_config.IP, l_config.MAC)
+	resp, err := udpPingAndGetStatus(ip)
+	if err != nil {
+		logf(true, "No response from %s, exiting.", ip)
+		return
 	}
 
-	for attempt := 1; attempt <= MaxRetries+2; attempt++ {
-		status, err := udpPingAndGetStatus(l_config.IP)
-		if err != nil {
-			logf(true, "UDP ping/status check failed for ip=%s: %v. Please reboot the board and retry.", l_config.IP, err)
-		}
-		logf("UDP status response: %s", status.Raw)
+	board, ok := parseBoardInfoFromReply(resp, ip)
+	if !ok {
+		logf(true, "Unrecognized reply from %s: %q, exiting.", ip, resp)
+		return
+	}
 
-		switch {
-		case strings.Contains(strings.ToLower(status.Mode), "boot"):
-			logf("[PATH] boot -> direct tcp")
-			RunEther_TCP(filePath)
+	targetUID := board.UID
+	logf("[PATH] target device UID=%s cached for this upgrade", targetUID)
+
+	switch strings.ToUpper(board.Role) {
+	case "BOOTLD-INVALID":
+		logf("[PATH] %s is bootloader with NO valid signed app installed (previous update failed, was rejected, or flash was tampered with) -> proceeding to flash a new image", ip)
+		RunEther_TCP(filePath, ip)
+
+	case "BOOTLD":
+		logf("[PATH] %s is bootloader -> tcp transfer", ip)
+		RunEther_TCP(filePath, ip)
+
+	case "CUSAPP":
+		logf("[PATH] %s is app -> reboot to bootloader", ip)
+		if err := authenticatedUDPReboot(ip); err != nil {
+			logf(err, "Failed to send authenticated reboot command to %s", ip)
+		}
+
+		wait := getRebootWaitDuration()
+		logf("Waiting %.1f seconds for reboot...", wait.Seconds())
+		time.Sleep(wait)
+
+		bootBoard, ok := discoverBootloader(bootloaderDiscoveryRetries, targetUID)
+		if !ok {
+			logf(true, "No bootloader with UID=%s found after %d attempts, exiting.", targetUID, bootloaderDiscoveryRetries)
 			return
-		case strings.Contains(strings.ToLower(status.Mode), "app"):
-			logf("[PATH] app -> reboot -> ping retry")
-			err = sendUDPNoResponseOnPort(l_config.IP, getUDPPort(), CM_Reboot)
-			logf(err, "Failed to send reboot command to %s", l_config.IP)
-			wait := getRebootWaitDuration()
-			logf("Waiting %.1f seconds for reboot...", wait.Seconds())
-			time.Sleep(wait)
-		default:
-			logf(true, "Unexpected ping status response mode=%q raw=%q", status.Mode, status.Raw)
 		}
+		logf("[PATH] bootloader found at %s (uid=%s) -> tcp transfer", bootBoard.IP, bootBoard.UID)
+		RunEther_TCP(filePath, bootBoard.IP)
+
+	default:
+		logf(true, "Unexpected role %q from %s, exiting.", board.Role, ip)
 	}
-
-	logf(true, "Unable to switch board to BOOT mode after retries")
 }
 
-func cacheBoardSelection(selected boardInfo) {
-	l_config.IP = selected.IP
-	l_config.MAC = selected.MAC
-	err := SaveConfig()
-	logf(err, "Failed to save board cache")
-	logf("Cached selected board: ip=%s mac=%s", selected.IP, selected.MAC)
+// discoverBootloader repeats the broadcast discovery until a bootloader reply
+// carrying targetUID is seen, since multiple devices on the LAN may answer the
+// broadcast and only the one that was just rebooted should be flashed.
+func discoverBootloader(maxAttempts int, targetUID string) (boardInfo, bool) {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		boards, err := discoverBoardsViaDirectedBroadcast("BOOTLD")
+		if err != nil {
+			logf("Bootloader discovery attempt %d/%d: %v", attempt, maxAttempts, err)
+			continue
+		}
+		if board, ok := selectDiscoveredBoard(boards, targetUID); ok {
+			return board, true
+		}
+		logf("Bootloader discovery attempt %d/%d: target UID=%s not among %d discovered device(s)", attempt, maxAttempts, targetUID, len(boards))
+	}
+	return boardInfo{}, false
 }
 
-func discoverBoardsViaDirectedBroadcast() ([]boardInfo, error) {
+func discoverBoardsViaDirectedBroadcast(expectedRole string) ([]boardInfo, error) {
 	broadcastAddrs, err := getDirectedBroadcastAddrs()
 	if err != nil {
 		return nil, err
@@ -90,7 +113,7 @@ func discoverBoardsViaDirectedBroadcast() ([]boardInfo, error) {
 	conn.SetDeadline(deadline)
 
 	for _, bcast := range broadcastAddrs {
-		remoteAddr, rerr := net.ResolveUDPAddr("udp4", bcast+":"+getUDPPort())
+		remoteAddr, rerr := net.ResolveUDPAddr("udp4", bcast+":"+getPort())
 		if rerr != nil {
 			logf("Skip invalid broadcast addr %s: %v", bcast, rerr)
 			continue
@@ -102,7 +125,6 @@ func discoverBoardsViaDirectedBroadcast() ([]boardInfo, error) {
 		logf("UDP broadcast sent to %s", remoteAddr.String())
 	}
 
-	seen := make(map[string]struct{})
 	var boards []boardInfo
 	buffer := make([]byte, Buf_s)
 	for {
@@ -120,203 +142,83 @@ func discoverBoardsViaDirectedBroadcast() ([]boardInfo, error) {
 			logf("Ignore invalid discovery response from %s: %q", addr.IP.String(), strings.TrimSpace(string(buffer[:n])))
 			continue
 		}
-
-		key := info.IP + "|" + info.MAC
-		if _, exists := seen[key]; exists {
+		if !strings.EqualFold(info.Role, expectedRole) {
+			logf("Ignore %s response from %s while waiting for %s: %s", info.Role, info.IP, expectedRole, info.Raw)
 			continue
 		}
-		seen[key] = struct{}{}
 		boards = append(boards, info)
 	}
 
 	if len(boards) == 0 {
-		return nil, fmt.Errorf("no valid discovery response")
+		return nil, fmt.Errorf("no valid %s discovery response within %.1f seconds", expectedRole, Timeout.Seconds())
 	}
-
-	sort.Slice(boards, func(i, j int) bool {
-		return boards[i].IP < boards[j].IP
-	})
+	printDiscoveredBoards(boards, expectedRole)
 	return boards, nil
 }
 
 func parseBoardInfoFromReply(reply, fallbackIP string) (boardInfo, bool) {
-	parts := strings.Split(strings.TrimSpace(reply), ",")
-	if len(parts) < 3 {
+	raw := strings.TrimSpace(reply)
+	parts := strings.Split(raw, "_")
+	if len(parts) < 4 {
 		return boardInfo{}, false
 	}
 	if strings.TrimSpace(parts[0]) != deviceReplyPrefix {
 		return boardInfo{}, false
 	}
 
-	ip := strings.TrimSpace(parts[2])
-	mac := ""
-	if len(parts) >= 4 {
-		mac = strings.TrimSpace(parts[3])
-	}
-	if ip == "" {
-		ip = fallbackIP
-	}
-	if ip == "" {
+	uid := strings.TrimSpace(parts[1])
+	role := strings.ToUpper(strings.TrimSpace(parts[2]))
+	ip := strings.TrimSpace(fallbackIP)
+	if uid == "" || ip == "" || role == "" {
 		return boardInfo{}, false
 	}
 
 	return boardInfo{
-		IP:  ip,
-		MAC: mac,
+		UID:     uid,
+		IP:      ip,
+		Role:    role,
+		Version: strings.Join(parts[3:], "_"),
+		Raw:     raw,
 	}, true
 }
 
-func printDiscoveredBoards(boards []boardInfo) {
-	logf("Discovered %d board(s):", len(boards))
+func printDiscoveredBoards(boards []boardInfo, expectedRole string) {
+	logf("Discovered %d %s device(s) in %.1f seconds:", len(boards), expectedRole, Timeout.Seconds())
 	for i, b := range boards {
-		fmt.Printf("  [%d] IP=%s MAC=%s\n", i+1, b.IP, b.MAC)
+		fmt.Printf("  [%d] UID=%s IP=%s Role=%s Reply=%s\n", i+1, b.UID, b.IP, b.Role, b.Raw)
 	}
+	fmt.Printf("Default selection: [1]")
+	if expectedRole == "CUSAPP" {
+		fmt.Printf(" (you can modify local_config.json appIP if you want a different device)")
+	}
+	fmt.Printf("\n")
 }
 
-func selectBoardAfterDiscovery(boards []boardInfo) (boardInfo, error) {
-	if len(boards) == 0 {
-		return boardInfo{}, fmt.Errorf("empty board list")
+func selectDiscoveredBoard(boards []boardInfo, targetUID string) (boardInfo, bool) {
+	for _, b := range boards {
+		if strings.EqualFold(b.UID, targetUID) {
+			logf("Matched cached target device: uid=%s ip=%s", b.UID, b.IP)
+			return b, true
+		}
 	}
-	if len(boards) == 1 {
-		logf("Single board found, auto-selecting ip=%s mac=%s", boards[0].IP, boards[0].MAC)
-		return boards[0], nil
-	}
-
-	printDiscoveredBoards(boards)
-	fmt.Printf("Found %d machines from UDP broadcast.\n", len(boards))
-	fmt.Printf("Please edit %s and set the target 'ip' and 'mac', then retry.\n", GetLocalConfigPath())
-	return boardInfo{}, fmt.Errorf("multiple UDP responses")
+	return boardInfo{}, false
 }
 
-type pingStatus struct {
-	Raw     string
-	Chip    string
-	Mode    string
-	Version string
-}
-
-func udpPingAndGetStatus(ip string) (pingStatus, error) {
-	buffer, _, err := sendUDPWithResponseOnPort(ip, getUDPPort(), CM_Ping, Timeout)
+func udpPingAndGetStatus(ip string) (string, error) {
+	buffer, _, err := sendUDPWithResponseOnPort(ip, getPort(), CM_Ping, Timeout)
 	if err != nil {
-		return pingStatus{}, err
+		return "", err
 	}
 
 	resp := strings.TrimSpace(string(buffer))
-	status, err := parsePingStatus(resp)
-	if err != nil {
-		return pingStatus{}, err
+	if !strings.HasPrefix(resp, deviceReplyPrefix) {
+		return "", fmt.Errorf("unexpected UDP ping response: %q", resp)
 	}
-	return status, nil
+	return resp, nil
 }
 
-func parsePingStatus(resp string) (pingStatus, error) {
-	raw := strings.TrimSpace(resp)
-	parts := strings.Split(raw, "_")
-	if len(parts) < 3 {
-		return pingStatus{}, fmt.Errorf("invalid ping response, expected chip_mode_version: %q", raw)
-	}
-
-	chip := strings.TrimSpace(parts[0])
-	mode := strings.TrimSpace(parts[1])
-	version := strings.TrimSpace(parts[2])
-	if chip == "" || mode == "" || version == "" {
-		return pingStatus{}, fmt.Errorf("invalid ping response fields: %q", raw)
-	}
-
-	return pingStatus{Raw: raw, Chip: chip, Mode: mode, Version: version}, nil
-}
-
-// ----------------------
-// func GetServerIP() string {
-// 	serverIP, _ := loadServerIP()
-
-// 	if serverIP == "" || !tryPing(serverIP) {
-// 		log.Println("Server unreachable or unknown, starting discovery...")
-
-// 		serverIP = discoverServer()
-// 		if serverIP == "" {
-// 			log.Println("No server found. Aborting.")
-// 			return ""
-// 		}
-
-// 		saveServerIP(serverIP)
-// 	}
-
-// 	sendUDPNoResponse(serverIP, CM_Reboot)
-// 	log.Println("Sent reboot command to ", serverIP, " and Waiting for OpenPLC restart...")
-// 	time.Sleep(3 * time.Second)
-// 	return serverIP
-// }
-// func getServerIPFilePath() string {
-// 	return filepath.Join(GetCurDir(), local_ip_file)
-// }
-// func deleteServerIPFile() error {
-// 	path := getServerIPFilePath()
-// 	return os.Remove(path)
-// }
-// func loadServerIP() (string, error) {
-// 	path := getServerIPFilePath()
-// 	data, err := os.ReadFile(path)
-// 	if err != nil {
-// 		return "", err
-// 	}
-// 	ip := strings.TrimSpace(string(data))
-// 	log.Println("Found IP in file:", ip)
-// 	return ip, nil
-// }
-
-// func saveServerIP(ip string) error {
-// 	path := getServerIPFilePath()
-// 	return os.WriteFile(path, []byte(ip), 0644)
-// }
-
-// func tryPing(serverAddr string) bool {
-// 	buffer, _, err := sendUDPWithResponse(serverAddr, CM_Ping)
-// 	if err != nil {
-// 		logf("tryPing receive failed:", err)
-// 		return false
-// 	}
-//
-// 	resp := string(buffer)
-// 	if resp == Rsp_Pong {
-// 		logf("Ping success.")
-// 		return true
-// 	}
-//
-// 	logf("Ping failed, response:", resp)
-// 	//deleteServerIPFile()
-// 	return false
-// }
-
-// func discoverServer() string {
-// 	broadcastAddr, err := getBroadcastAddress()
-// 	if err != nil {
-// 		logf("Broadcast address resolve failed:", err)
-// 		return ""
-// 	}
-//
-// 	for attempt := 1; attempt <= MaxRetries; attempt++ {
-// 		logf("Broadcasting (", attempt, ")...")
-// 		_, addr, err := sendUDPWithResponse(broadcastAddr, CM_PullIP)
-// 		if err != nil {
-// 			logf("Broadcast receive failed:", err)
-// 			logf("Waiting for 2 seconds...", err)
-// 			time.Sleep(2 * time.Second)
-// 			continue
-// 		}
-// 		logf("Received from ", addr.IP.String())
-// 		return addr.IP.String()
-// 	}
-//
-// 	return ""
-// }
-
-// Send UDP message and wait for a response within Timeout duration.
+// Send UDP message and wait for a response within timeout.
 // Returns response bytes and error (nil if success).
-// func sendUDPWithResponse(serverAddr, msg string) ([]byte, *net.UDPAddr, error) {
-// 	return sendUDPWithResponseOnPort(serverAddr, s_udp_port, msg, Timeout)
-// }
-
 func sendUDPWithResponseOnPort(serverAddr, port, msg string, timeout time.Duration) ([]byte, *net.UDPAddr, error) {
 	// listen up from UDP port
 	localAddr := &net.UDPAddr{IP: net.IPv4zero, Port: 0}
@@ -340,7 +242,7 @@ func sendUDPWithResponseOnPort(serverAddr, port, msg string, timeout time.Durati
 	if err != nil {
 		return nil, nil, fmt.Errorf("UDP WriteToUDP failed: %w", err)
 	}
-	logf("UDP sent:", msg)
+	logf("UDP sent: %s", msg)
 
 	// receive reply
 	buffer := make([]byte, Buf_s)
@@ -352,11 +254,24 @@ func sendUDPWithResponseOnPort(serverAddr, port, msg string, timeout time.Durati
 	return buffer[:n], addr, nil
 }
 
-// Send UDP message without waiting for a response.
-// func sendUDPNoResponse(serverAddr, msg string) error {
-// 	return sendUDPNoResponseOnPort(serverAddr, s_udp_port, msg)
-// }
+// authenticatedUDPReboot performs the challenge-response handshake before
+// sending CM_Reboot: request a nonce, prove possession of iapAuthKey by
+// HMAC-signing the exact reboot command, then send the authenticated form.
+// An unauthenticated "openplc_server_reboot" (no hmac) is now ignored by
+// the device.
+func authenticatedUDPReboot(ip string) error {
+	nonceResp, _, err := sendUDPWithResponseOnPort(ip, getPort(), CM_RebootChallenge, Timeout)
+	if err != nil {
+		return fmt.Errorf("reboot challenge request failed: %w", err)
+	}
+	hmacHex, err := computeAuthHMAC(string(nonceResp), CM_Reboot)
+	if err != nil {
+		return err
+	}
+	return sendUDPNoResponseOnPort(ip, getPort(), fmt.Sprintf("%s %s", CM_Reboot, hmacHex))
+}
 
+// Send UDP message without waiting for a response.
 func sendUDPNoResponseOnPort(serverAddr, port, msg string) error {
 	conn, err := net.Dial("udp", serverAddr+":"+port)
 	if err != nil {
@@ -416,10 +331,10 @@ func getDirectedBroadcastAddrs() ([]string, error) {
 }
 
 // TCP
-func RunEther_TCP(filePath string) {
-	logf("Trying to connect to TCP server...")
+func RunEther_TCP(filePath, serverIP string) {
+	logf("Trying to connect to TCP server at %s...", serverIP)
 
-	conn, err := net.DialTimeout("tcp", l_config.IP+":"+getTCPPort(), Timeout)
+	conn, err := net.DialTimeout("tcp", serverIP+":"+getPort(), Timeout)
 	if err != nil {
 		logf(true, "Failed to connect to server: %v", err)
 	}
@@ -434,25 +349,20 @@ func RunEther_TCP(filePath string) {
 	}
 }
 
-func getUDPPort() string {
-	if strings.TrimSpace(l_config.UDPPort) != "" {
-		return strings.TrimSpace(l_config.UDPPort)
+// getPort returns the configured server port (shared by the TCP flash
+// channel and the UDP discovery/reboot channel), falling back to the default.
+func getPort() string {
+	if strings.TrimSpace(l_config.ServerPort) != "" {
+		return strings.TrimSpace(l_config.ServerPort)
 	}
-	return defaultUDPPort
-}
-
-func getTCPPort() string {
-	if strings.TrimSpace(l_config.TCPPort) != "" {
-		return strings.TrimSpace(l_config.TCPPort)
-	}
-	return defaultTCPPort
+	return defaultServerPort
 }
 
 func getRebootWaitDuration() time.Duration {
-	if l_config.RebootWaitSeconds >= 5 {
+	if l_config.RebootWaitSeconds > 0 {
 		return time.Duration(l_config.RebootWaitSeconds) * time.Second
 	}
-	return 5 * time.Second
+	return time.Duration(defaultRebootWaitSeconds) * time.Second
 }
 
 // 发送 ping 并等待 ok
@@ -483,9 +393,44 @@ func sendFile(conn net.Conn, filePath string) error {
 	defer file.(io.Closer).Close()
 	logf("CRC Checksum: %x", checksum)
 
-	// Send flash command
+	sigHex, err := loadSignature(filePath)
+	if err != nil {
+		return err
+	}
 
-	flashCmd := fmt.Sprintf("%s %d %x", CM_Flash, fileSize, checksum)
+	localVersion, haveVersion, err := loadVersion(filePath)
+	if err != nil {
+		return err
+	}
+	if haveVersion {
+		remoteVer, verErr := sendAndReadResponse(conn, []byte(CM_GetVersion))
+		if verErr != nil {
+			logf("Could not query installed version (older bootloader?): %v -- skipping downgrade check", verErr)
+		} else if !confirmDowngradeIfNeeded(localVersion, remoteVer) {
+			return fmt.Errorf("downgrade declined by operator")
+		}
+	}
+
+	base := fmt.Sprintf("%s %d %x %s", CM_Flash, fileSize, checksum, sigHex)
+	authMsg := base
+	if haveVersion {
+		authMsg = fmt.Sprintf("%s %d", base, localVersion)
+	}
+
+	nonceResp, err := sendAndReadResponse(conn, []byte(CM_AuthChallenge))
+	if err != nil {
+		return fmt.Errorf("auth challenge failed: %v", err)
+	}
+	hmacHex, err := computeAuthHMAC(nonceResp, authMsg)
+	if err != nil {
+		return err
+	}
+
+	// Send flash command
+	flashCmd := fmt.Sprintf("%s %s", base, hmacHex)
+	if haveVersion {
+		flashCmd = fmt.Sprintf("%s %s %d", base, hmacHex, localVersion)
+	}
 	if err := sendAndWaitOK(conn, []byte(flashCmd)); err != nil {
 		return fmt.Errorf("failed to send FLASH: %v", err)
 	}
@@ -529,4 +474,23 @@ func sendAndWaitOK(conn net.Conn, data []byte) error {
 		return fmt.Errorf("unexpected ack: %s", string(ack[:n]))
 	}
 	return nil
+}
+
+// sendAndReadResponse sends data and returns whatever the device replies
+// with (trimmed), rather than checking against a fixed "OK". Used to read
+// back the nonce from an "authchallenge" request.
+func sendAndReadResponse(conn net.Conn, data []byte) (string, error) {
+	conn.SetWriteDeadline(time.Now().Add(Timeout))
+	if _, err := conn.Write(data); err != nil {
+		return "", fmt.Errorf("send error: %v", err)
+	}
+	logf("Sent %d bytes", len(data))
+
+	conn.SetReadDeadline(time.Now().Add(Timeout))
+	resp := make([]byte, 256)
+	n, err := conn.Read(resp)
+	if err != nil {
+		return "", fmt.Errorf("read response error: %v", err)
+	}
+	return strings.TrimSpace(string(resp[:n])), nil
 }
