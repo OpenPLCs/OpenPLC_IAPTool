@@ -1,13 +1,7 @@
 {
   "BaudRate": 115200,
-  "Parity": 0,
-  "DataBits": 8,
-  "StopBits": 0,
-  "ReadTimeout": 0,
   "uid": "",
-  "bootIP": "",
-  "appIP": "",
-  "mac": "",
   "server_port": "56865",
-  "reboot_wait_seconds": 4
+  "reboot_wait_seconds": 4,
+  "signing_key": ""
 }

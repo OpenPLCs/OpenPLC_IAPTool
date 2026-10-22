@@ -1,0 +1,2 @@
+# Installed verbatim as the macOS IAPTool: a CRLF shebang does not run.
+tools/macos-launcher.sh text eol=lf
