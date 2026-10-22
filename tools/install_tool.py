@@ -29,7 +29,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 # Output/<GOOS> in this repo -> <platform> directory in the board package, and
-# the files copied. macOS's IAPTool is the launcher for the two builds (IDE-18).
+# the files copied. macOS's IAPTool is the launcher for the two builds.
 TARGETS = [("windows", "win", ["IAPTool.exe"]),
            ("darwin", "macosx", ["IAPTool", "IAPTool-amd64", "IAPTool-arm64"]),
            ("linux", "linux", ["IAPTool"])]

@@ -336,8 +336,7 @@ func RunTakeOwn(ip, keyPath string) {
 //
 // With wipe, the board also empties its revocation records, the only way to
 // get those slots back; it rewrites its state sector to do so and resets. The
-// board never decides to do this on its own -- the operator asks for it
-// (OWN-07).
+// board never decides to do this on its own -- the operator asks for it.
 func RunSetOwner(ip, currentKeyPath, newKeyPath string, wipe bool) {
 	if strings.TrimSpace(currentKeyPath) == "" || strings.TrimSpace(newKeyPath) == "" {
 		logf(true, "setowner needs both keys:\n"+

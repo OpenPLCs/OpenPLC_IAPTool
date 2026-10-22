@@ -61,7 +61,7 @@ func TestRebootFoundAtOriginalIP(t *testing.T) {
 	}
 }
 
-// IDE-16: a bootloader that cannot answer for up to 19 s is still caught by
+// A bootloader that cannot answer for up to 19 s is still caught by
 // the once-a-second identify, without another reboot request.
 func TestRebootSlowBootloaderNeedsNoSecondRequest(t *testing.T) {
 	quiet := make([]string, 19)

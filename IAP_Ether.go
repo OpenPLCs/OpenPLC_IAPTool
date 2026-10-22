@@ -36,7 +36,7 @@ const bootloaderDiscoveryRetries = 3
 
 // How many times to ask a running application to reboot into the bootloader.
 // The handshake has no acknowledgement of its own, so one lost datagram must
-// not end the upload (OWN-08).
+// not end the upload.
 const rebootAttempts = 3
 
 // Pause between identify attempts. The board's discovery cap is device-wide,

@@ -22,7 +22,7 @@ DARWIN = OUTPUT / "darwin"
 
 # (GOOS, GOARCH, output file)
 # macOS: Output/darwin/IAPTool is a launcher that picks IAPTool-arm64 or
-# IAPTool-amd64 by CPU, so platform.txt keeps calling macosx/IAPTool (IDE-18).
+# IAPTool-amd64 by CPU, so platform.txt keeps calling macosx/IAPTool.
 TARGETS = [
     ("windows", "amd64", OUTPUT / "windows" / "IAPTool.exe"),
     ("linux", "amd64", OUTPUT / "linux" / "IAPTool"),
