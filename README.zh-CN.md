@@ -1,4 +1,4 @@
-# IAPTranfer_Tool
+# OpenPLC_IAPTool
 用于向 OpenPLC 传输 bin 文件
 
 English: [README.md](README.md)

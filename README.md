@@ -1,4 +1,4 @@
-﻿# IAPTranfer_Tool
+﻿# OpenPLC_IAPTool
 For OpenPLC transfer bin file
 
 中文：[README.zh-CN.md](README.zh-CN.md)

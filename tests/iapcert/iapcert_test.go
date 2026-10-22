@@ -1,5 +1,5 @@
 // Package testcase holds standalone Go tests for the certificate primitives
-// the IAP protocol runs on (see IAPTranfer_Tool/iapcert).
+// the IAP protocol runs on (see OpenPLC_IAPTool/iapcert).
 //
 // What these pin down is the part the board cannot tell us about: the exact
 // bytes the root signature covers. The board's half of the same format is
