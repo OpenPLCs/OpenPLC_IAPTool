@@ -117,7 +117,7 @@ refused from its next upload on, while firmware it already installed keeps
 running (`IAPTool getapprevoked` finds those boards). Handing the board to a new
 root (`IAPTool setowner`) retires every certificate the old root issued,
 including on firmware already installed. See
-`OpenPLC_Docs/docs/modules/M2-ownership.md`.
+`OpenPLC_Instruction/docs/modules/M2-ownership.md`.
 
 ### Mismatch is caught before the transfer
 

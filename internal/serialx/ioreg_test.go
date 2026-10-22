@@ -3,8 +3,7 @@ package serialx
 import "testing"
 
 // Hand-written from ioreg's documented layout, NOT recorded on a real Mac.
-// Replace it with a recording once one exists - see XPT-03 in
-// $PROD/maps/porttool-on-linux-and-macos/.
+// Replace it with a recording from a real Mac once one is available.
 //
 // A hub with an ST-Link under it (its own VCP is 0483:3754), then the board's
 // CDC port (0483:5740), then a device with no serial port at all.

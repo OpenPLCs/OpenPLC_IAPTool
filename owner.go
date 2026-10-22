@@ -21,8 +21,9 @@ package main
 //
 // See $PROD/docs/modules/M2-ownership.md for why the first claim has no
 // gate and every later one needs a signature. Revocation names a
-// leaf by the first 16 bytes of its public key, not a tool-assigned number --
-// see $PROD/maps/owner-revoke-and-boot-upgrade/issues/OWN-01-revoke-by-serial-or-by-pubkey.md.
+// leaf by the first 16 bytes of its public key, not a tool-assigned number, so
+// no counter has to stay unique across machines ($PROD/docs/modules/M2-ownership.md,
+// "'R' 记录").
 
 import (
 	"bytes"

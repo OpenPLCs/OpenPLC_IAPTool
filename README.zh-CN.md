@@ -101,7 +101,7 @@ IAPTool ether app.bin 192.168.1.50           # 别的都不用改
 撤销某位同事用 `IAPTool revoke --leaf=<他的公钥>`：这个叶证书从下一次上传起被拒绝，
 它已经装上的固件继续运行（`IAPTool getapprevoked` 能找出这些板子）。把板子交给新的根
 （`IAPTool setowner`）会让旧根签发的所有证书失效，包括已经装上的固件。见
-`OpenPLC_Docs/docs/modules/M2-ownership.md`。
+`OpenPLC_Instruction/docs/modules/M2-ownership.md`。
 
 ### 不匹配在传输前就发现
 

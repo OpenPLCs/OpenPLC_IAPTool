@@ -10,7 +10,6 @@ import (
 
 // The detailed enumerator needs cgo on macOS, which would cost the one-command
 // cross-compile. ioreg ships with every macOS and gives the same USB ids.
-// See $PROD/maps/porttool-on-linux-and-macos/issues/XPT-01-macos-serial-port-without-description-or-vid.md
 func listPorts() ([]PortInfo, error) {
 	names, err := serial.GetPortsList()
 	if err != nil {
