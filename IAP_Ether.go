@@ -2,13 +2,11 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"net"
 	"sort"
 	"strings"
 	"time"
 
-	"IAPTool/iapcert"
 	"IAPTool/iapproto"
 	"IAPTool/netiface"
 )
@@ -57,7 +55,7 @@ const (
 // bootloader image over the same path -- see $PROD/docs/modules/M1/FLASHBOOT.md
 // for what the board does differently with it.
 func RunEtherUpgrade(filePath, ip string) {
-	runEtherFlow(filePath, ip, CM_Flash)
+	runUpload(etherLink{ip: ip}, filePath, CM_Flash)
 }
 
 // RunEtherFlashBoot replaces the board's bootloader.
@@ -67,83 +65,80 @@ func RunEtherUpgrade(filePath, ip string) {
 // same key also serves as the session identity, so one --key is enough.
 func RunEtherFlashBoot(filePath, ip string) {
 	logf("** flashboot replaces the bootloader in place. Do not cut power. **")
-	runEtherFlow(filePath, ip, CM_FlashBoot)
+	runUpload(etherLink{ip: ip}, filePath, CM_FlashBoot)
 }
 
-func runEtherFlow(filePath, ip, verb string) {
-	logf("[PATH] start ether %s flow, target=%s", verb, ip)
+// etherLink reaches a board by IP: UDP for identify and reboot, one TCP
+// connection for the bootloader session (decision 54).
+type etherLink struct{ ip string }
 
-	resp, err := udpIdentifyWithRetry(ip)
+func (l etherLink) target() string { return l.ip }
+
+func (l etherLink) identify() (boardInfo, error) {
+	resp, err := udpIdentifyWithRetry(l.ip)
 	if err != nil {
-		logf(true, "No response from %s after %d attempts, exiting.", ip, bootloaderDiscoveryRetries)
-		return
+		return boardInfo{}, fmt.Errorf("No response from %s after %d attempts, exiting.", l.ip, bootloaderDiscoveryRetries)
 	}
-
-	board, ok := parseBoardInfoFromReply(resp, ip)
+	board, ok := parseBoardInfoFromReply(resp, l.ip)
 	if !ok {
-		logf(true, "Unrecognized reply from %s: %q, exiting.", ip, resp)
-		return
+		return boardInfo{}, fmt.Errorf("Unrecognized reply from %s: %q, exiting.", l.ip, resp)
 	}
-
-	targetUID := board.UID
-	logv("[PATH] target device UID=%s cached for this upgrade", targetUID)
-
-	// Has to run here, before anything asks the board to leave the
-	// application: in the bootloader the app-version field is "-" and what is
-	// currently installed can no longer be read. A board that never answered
-	// has already exited above, so reaching this line means discovery worked.
-	// Skipped for flashboot: a bootloader image carries no sketch version,
-	// and the field the gate reads describes the application.
-	if verb == CM_Flash {
-		checkVersionGate(filePath, board, true, g_forceFlash)
-	}
-
-	// A board with no root is always in its bootloader: nothing it could run
-	// has been verified. Only an application upload claims it; flashboot on
-	// such a board is refused by the board.
-	if verb == CM_Flash && strings.HasPrefix(strings.ToUpper(board.Role), "BOOTLD") {
-		if err := claimIfUnclaimed(func(cmd string) (string, error) {
-			return ownerCommand(ip, cmd)
-		}); err != nil {
-			logf(err, "Cannot claim this board")
-			return
-		}
-	}
-
-	// Resolved once and reused: a run that starts from the application state
-	// authenticates twice (the reboot, then the flash), and issuing a fresh
-	// self-signed certificate for each would burn two serial numbers on one
-	// upload.
-	id, err := resolveUploadIdentity()
-	if err != nil {
-		logf(err, "Cannot authenticate to this board")
-		return
-	}
-
-	switch strings.ToUpper(board.Role) {
-	case "BOOTLD-INVALID":
-		logf("[PATH] %s is bootloader with NO valid signed app installed (previous update failed, was rejected, or flash was tampered with) -> proceeding to flash a new image", ip)
-		RunEther_TCP(filePath, ip, id, verb, targetUID)
-
-	case "BOOTLD":
-		logf("[PATH] %s is bootloader (uid=%s) -> tcp transfer", ip, targetUID)
-		RunEther_TCP(filePath, ip, id, verb, targetUID)
-
-	case "CUSAPP":
-		logf("[PATH] %s is app -> reboot to bootloader", ip)
-		res := rebootIntoBootloader(func() error { return authenticatedUDPReboot(ip, id) },
-			newBoardFinder(ip, targetUID))
-		if res.state != rebootInBootloader {
-			logf(true, "%s", rebootFailureText(res, ip, targetUID, id.keyPath))
-			return
-		}
-		logf("[PATH] bootloader found at %s (uid=%s) -> tcp transfer", res.board.IP, res.board.UID)
-		RunEther_TCP(filePath, res.board.IP, id, verb, targetUID)
-
-	default:
-		logf(true, "Unexpected role %q from %s, exiting.", board.Role, ip)
-	}
+	return board, nil
 }
+
+func (l etherLink) requestReboot(id uploadIdentity) error {
+	return authenticatedReboot(id,
+		func() (string, error) {
+			resp, _, err := sendUDPWithResponseOnPort(l.ip, getPort(), CM_RebootChallenge, Timeout)
+			return string(resp), err
+		},
+		func(cmd string) error { return sendUDPNoResponseOnPort(l.ip, getPort(), cmd) })
+}
+
+func (l etherLink) finder(uid string) *boardFinder { return newBoardFinder(l.ip, uid) }
+
+func (l etherLink) openSession(board boardInfo) (session, error) {
+	logv("Trying to connect to TCP server at %s...", board.IP)
+	conn, err := iapproto.DialTCP(board.IP, getPort(), Timeout)
+	if err != nil {
+		return nil, err
+	}
+	return tcpSession{conn}, nil
+}
+
+// An accepted image resets the board; it is confirmed by the board answering
+// on the network again.
+func (l etherLink) resetSeen(board boardInfo) (func(bool) bool, time.Duration) {
+	f := newBoardFinder(board.IP, board.UID)
+	return func(bool) bool {
+		st := f.look().state
+		if st == rebootInBootloader || st == rebootStillApp {
+			logf("The board reset and is answering again - the image was accepted.")
+			return true
+		}
+		return false
+	}, etherResetPoll
+}
+
+// tcpSession is a session over the bootloader's TCP connection.
+type tcpSession struct{ conn net.Conn }
+
+func (s tcpSession) write(b []byte) error {
+	s.conn.SetWriteDeadline(time.Now().Add(Timeout))
+	_, err := s.conn.Write(b)
+	return err
+}
+
+func (s tcpSession) readSome(p []byte, wait time.Duration) (int, error) {
+	s.conn.SetReadDeadline(time.Now().Add(wait))
+	n, err := s.conn.Read(p)
+	if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		return n, nil
+	}
+	return n, err
+}
+
+func (s tcpSession) Close() error { return s.conn.Close() }
 
 type rebootState int
 
@@ -165,7 +160,7 @@ type rebootResult struct {
 type boardFinder struct {
 	ip, uid   string
 	identify  func() (string, error)      // one unicast identify of ip
-	broadcast func() ([]boardInfo, error) // one broadcast discovery round
+	broadcast func() ([]boardInfo, error) // one broadcast discovery round; nil on USB
 	now       func() time.Time
 	sleep     func(time.Duration)
 	quietFrom time.Time // when ip stopped answering; zero while it answers
@@ -193,6 +188,9 @@ func (f *boardFinder) look() rebootResult {
 			return rebootResult{state: rebootOtherBoard, other: board.UID}
 		}
 		return roleResult(board)
+	}
+	if f.broadcast == nil {
+		return rebootResult{state: rebootNoAnswer}
 	}
 	if f.quietFrom.IsZero() {
 		f.quietFrom = f.now()
@@ -473,28 +471,12 @@ func sendUDPWithResponseOnPort(serverAddr, port, msg string, timeout time.Durati
 	return buffer[:n], conn.RemoteAddr().(*net.UDPAddr), nil
 }
 
-// authenticatedUDPReboot performs the challenge-response handshake before
-// sending CM_Reboot: request a nonce, sign the exact reboot command, then send
-// the certificate and that signature. An unauthenticated
-// "openplc_server_reboot" is ignored by the device.
-func authenticatedUDPReboot(ip string, id uploadIdentity) error {
-	nonceResp, _, err := sendUDPWithResponseOnPort(ip, getPort(), CM_RebootChallenge, Timeout)
-	if err != nil {
-		return fmt.Errorf("reboot challenge request failed: %w", err)
-	}
-	noncesigHex, err := iapcert.NonceSig(id.key, string(nonceResp), CM_Reboot)
-	if err != nil {
-		return err
-	}
-	return sendUDPNoResponseOnPort(ip, getPort(), fmt.Sprintf("%s %s %s", CM_Reboot, id.certHex, noncesigHex))
-}
-
 // Boot log read over UDP. Wire format: $PROD/docs/modules/M1/IAP-PROTOCOL.md
 // "openplc_log". The whole 4 KB buffer is about five pieces; the cap only stops
 // a board whose log grows faster than we read it.
 const (
-	logReadMaxPieces  = 64
-	logReadAttempts   = 3
+	logReadMaxPieces = 64
+	logReadAttempts  = 3
 	// The board drops requests over 20 replies/s; wait out its window before retrying.
 	logReadRetryDelay = time.Second
 )
@@ -617,42 +599,6 @@ func getDirectedBroadcastAddrs() ([]string, error) {
 	return addrs, nil
 }
 
-// TCP
-//
-// One connection for the whole upload: dial, ping, confirm the board accepts
-// this identity, then send the file.
-func RunEther_TCP(filePath, serverIP string, id uploadIdentity, verb, targetUID string) {
-	sigHex, err := signImageInMemory(filePath, id.key)
-	logf(err, "Failed to prepare signature for %s", filePath)
-
-	logv("Trying to connect to TCP server at %s...", serverIP)
-
-	conn, err := iapproto.DialTCP(serverIP, getPort(), Timeout)
-	if err != nil {
-		logf(true, "Failed to connect to server: %v", err)
-	}
-	defer conn.Close()
-
-	if err := ping(conn); err != nil {
-		logf(true, "Ping failed: %v", err)
-	}
-
-	if err := verifyIdentityMatchesDevice(id, func() (string, error) {
-		return sendAndReadResponse(conn, []byte(CM_GetPubKey+"\n"))
-	}); err != nil {
-		logf(true, "Signing key check failed: %v", err)
-	}
-
-	f := newBoardFinder(serverIP, targetUID)
-	cameBack := func() bool {
-		st := f.look().state
-		return st == rebootInBootloader || st == rebootStillApp
-	}
-	if err := sendFile(conn, filePath, id, sigHex, verb, cameBack); err != nil {
-		logf(err, "File send failed")
-	}
-}
-
 // getPort returns the configured server port (shared by the TCP flash
 // channel and the UDP discovery/reboot channel), falling back to the default.
 func getPort() string {
@@ -667,201 +613,4 @@ func getRebootWaitDuration() time.Duration {
 		return time.Duration(l_config.RebootWaitSeconds) * time.Second
 	}
 	return time.Duration(defaultRebootWaitSeconds) * time.Second
-}
-
-// ping sends "ping" and waits for "OK", retrying up to MaxRetries times.
-func ping(conn net.Conn) error {
-	var lastErr error
-	for attempt := 1; attempt <= MaxRetries; attempt++ {
-		logv("Sending ping...")
-		if err := sendAndWaitOK(conn, []byte(CM_Ping+"\n")); err != nil {
-			logv("ping failed: %v", err)
-			lastErr = err
-		} else {
-			logv("Ping successful.")
-			return nil
-		}
-
-		time.Sleep(1 * time.Second)
-	}
-	if lastErr != nil {
-		return fmt.Errorf("ping failed after %d retries: %w", MaxRetries, lastErr)
-	}
-	return fmt.Errorf("ping failed after %d retries", MaxRetries)
-}
-
-// sendFile carries no interactive step: the identity check already ran on
-// this same connection, in RunEther_TCP, before this is called.
-func sendFile(conn net.Conn, filePath string, id uploadIdentity, sigHex, verb string, cameBack func() bool) error {
-	// Calculate checksum and file size
-	checksum, fileSize, file := CalculateCRC32(filePath)
-	defer file.(io.Closer).Close()
-	logv("CRC Checksum: %x", checksum)
-
-	flashCmd, err := flashCommand(id, verb, fileSize, checksum, sigHex, func() (string, error) {
-		return sendAndReadResponse(conn, []byte(CM_AuthChallenge+"\n"))
-	})
-	if err != nil {
-		return err
-	}
-
-	// Send flash command
-	if err := sendAndWaitOK(conn, []byte(flashCmd+"\n")); err != nil {
-		return fmt.Errorf("failed to send FLASH: %v", err)
-	}
-	// Raw binary chunks below -- do NOT append "\n" framing to these, only
-	// to the text commands above; the device switches to FLASH_RECEIVE
-	// state after the "OK" ack and treats every subsequent byte as image
-	// data, not text to scan for a newline.
-	buf := make([]byte, Buf_b)
-	bar := newProgress(fileSize)
-	defer bar.end()
-	for {
-		n, readErr := file.Read(buf)
-		if n > 0 {
-			if err := sendAndWaitOK(conn, buf[:n]); err != nil {
-				return fmt.Errorf("failed to send chunk: %v", err)
-			}
-			bar.add(n)
-		}
-		if readErr == io.EOF {
-			bar.end()
-			// The board has every byte now, but it has not judged them yet:
-			// it verifies the staged image and only then says whether it
-			// took it. Reading that verdict is the difference between
-			// "uploaded" and "accepted" -- without it a refused image was
-			// reported as a successful transfer.
-			if err := readFinalVerdict(conn, verb, cameBack); err != nil {
-				return err
-			}
-			logf("File transfer complete.")
-			// Only now is the one-shot force marker written: a transfer that
-			// failed above never reaches this line, so retrying a failed
-			// forced flash is not blocked.
-			noteFlashSucceeded()
-			break
-		}
-		if readErr != nil {
-			return fmt.Errorf("file read error: %v", readErr)
-		}
-	}
-	return nil
-}
-
-// After the last chunk the board verifies the image, and only then decides.
-// It answers ONLY to refuse -- "Signature Failed", "No Signature",
-// "Flash Failed". Both success paths reset the board instead, and a reset
-// takes the MAC down before anything queued for the peer leaves it, so there
-// is no "OK" to wait for.
-//
-// So success is confirmed the only way it can be: the board comes back and
-// answers discovery again.
-const (
-	// The whole window. Long because a refusal from the flash write itself
-	// arrives only after the application region has been erased and written.
-	verdictTimeout = 90 * time.Second
-	// One slice of TCP listening before looking for the board on the network
-	// instead. Short: a refusal that is coming is already on its way.
-	verdictPoll = 2 * time.Second
-)
-
-// readFinalVerdict decides whether the board took the image.
-//
-// Returns nil only on evidence: either the board said OK (no path does today,
-// but a refusal-shaped silence must not be read as one), or it came back on
-// the network, which only happens after it reset, which only happens when it
-// accepted. Anything the board says other than OK is a refusal.
-func readFinalVerdict(conn net.Conn, verb string, cameBack func() bool) error {
-	deadline := time.Now().Add(verdictTimeout)
-
-	for time.Now().Before(deadline) {
-		// Errors here are not failures: a reset board yields a timeout or a
-		// dropped connection, and that is one of the expected outcomes.
-		resp, _ := readWithIdleGap(conn, verdictPoll)
-		if said := strings.TrimSpace(string(resp)); said != "" {
-			if said == Rsp_OK {
-				return nil
-			}
-			return fmt.Errorf("the board refused the image: %s", said)
-		}
-		if cameBack() {
-			logf("The board reset and is answering again - the image was accepted.")
-			return nil
-		}
-	}
-	return fmt.Errorf("the board neither refused the image nor came back within %s. "+
-		"It was NOT confirmed: check its log before assuming anything was written", verdictTimeout)
-}
-
-// readWithIdleGap accumulates reads from conn until it goes quiet for
-// idleGap, instead of trusting a single Read() to return a complete reply.
-// Mirrors the CDC-side fix in SendCommandReadResponse: a short TCP write on
-// the device side can still reach the caller split across more than one
-// Read() (Go's net.Conn makes no promise that one Write() on the far end
-// arrives as one Read() on this end), so treating the first Read() as "the
-// whole response" is not safe here either.
-func readWithIdleGap(conn net.Conn, overallTimeout time.Duration) ([]byte, error) {
-	const idleGap = 100 * time.Millisecond
-	buf := make([]byte, 256)
-	var accumulated []byte
-	deadline := time.Now().Add(overallTimeout)
-
-	for time.Now().Before(deadline) {
-		conn.SetReadDeadline(time.Now().Add(idleGap))
-		n, err := conn.Read(buf)
-		if n > 0 {
-			accumulated = append(accumulated, buf[:n]...)
-			continue
-		}
-		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				if len(accumulated) > 0 {
-					return accumulated, nil
-				}
-				continue
-			}
-			return accumulated, err
-		}
-	}
-	if len(accumulated) == 0 {
-		return nil, fmt.Errorf("timeout waiting for response")
-	}
-	return accumulated, nil
-}
-
-// sendAndWaitOK sends data and waits for the board to answer "OK".
-func sendAndWaitOK(conn net.Conn, data []byte) error {
-	conn.SetWriteDeadline(time.Now().Add(Timeout))
-	dataLen, err := conn.Write(data)
-	if err != nil {
-		return fmt.Errorf("send error: %v", err)
-	}
-
-	logv("Sent %d bytes", dataLen)
-
-	resp, err := readWithIdleGap(conn, Timeout)
-	if err != nil {
-		return fmt.Errorf("read ack error: %v", err)
-	}
-	if strings.TrimSpace(string(resp)) != Rsp_OK {
-		return fmt.Errorf("unexpected ack: %s", string(resp))
-	}
-	return nil
-}
-
-// sendAndReadResponse sends data and returns whatever the device replies
-// with (trimmed), rather than checking against a fixed "OK". Used to read
-// back the nonce from an "authchallenge" request.
-func sendAndReadResponse(conn net.Conn, data []byte) (string, error) {
-	conn.SetWriteDeadline(time.Now().Add(Timeout))
-	if _, err := conn.Write(data); err != nil {
-		return "", fmt.Errorf("send error: %v", err)
-	}
-	logv("Sent %d bytes", len(data))
-
-	resp, err := readWithIdleGap(conn, Timeout)
-	if err != nil {
-		return "", fmt.Errorf("read response error: %v", err)
-	}
-	return strings.TrimSpace(string(resp)), nil
 }

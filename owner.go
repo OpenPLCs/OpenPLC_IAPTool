@@ -80,7 +80,7 @@ func ownerCommand(target, cmd string) (string, error) {
 			return "", fmt.Errorf("cannot open %s: %v", target, err)
 		}
 		defer port.Close()
-		reply, err := SendCommandReadResponse(port, cmd, CommandTimeout)
+		reply, err := ask(serialSession{port}, cmd, CommandTimeout)
 		if err != nil {
 			// A running sketch owns the USB port and answers nothing yet.
 			return "", fmt.Errorf("%v (is the board in its bootloader? a running sketch answers these only over the network for now)", err)
@@ -94,7 +94,7 @@ func ownerCommand(target, cmd string) (string, error) {
 		return "", fmt.Errorf("cannot reach %s: %v (is the board in its bootloader? a running sketch does not take this command)", target, err)
 	}
 	defer conn.Close()
-	return sendAndReadResponse(conn, []byte(cmd+"\n"))
+	return ask(tcpSession{conn}, cmd, Timeout)
 }
 
 // ownerQueryAttempts covers a lost datagram; the board's 20 replies/s cap is

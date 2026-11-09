@@ -1,7 +1,7 @@
 package main
 
 import (
-	"io"
+	"fmt"
 	"strings"
 	"time"
 
@@ -16,161 +16,189 @@ func openPort(comName string, baudRate int) (serial.Port, error) {
 }
 
 func RunCDC(portName, filePath string) {
-	logf("[PATH] start cdc upgrade flow, target=%s", portName)
-
-	board, ok := cdcIdentify(portName)
-	if ok {
-		// Runs, but on this path it can only ever let the upload through: a
-		// board that answers cdcIdentify is already in the bootloader, and the
-		// bootloader reports "-" for the app version. A board still running the
-		// application answers nothing at all (see cdcIdentify below), so there
-		// is no moment on the CDC path at which the installed version is
-		// readable.
-		//
-		// => THE VERSION GATE DOES NOT PROTECT CDC UPLOADS. Only the ethernet
-		// path can compare. The call is kept so the one-shot force marker is
-		// still reset by an upload without --force, and so this stays correct
-		// if the CDC path ever learns to reach the application.
-		checkVersionGate(filePath, board, true, g_forceFlash)
-	}
-	if !ok {
-		logf("No bootloader answered. Asking the application to reboot into it...")
-		triggerPortResetAndWait(portName, getRebootWaitDuration())
-
-		for attempt := 1; attempt <= bootloaderDiscoveryRetries; attempt++ {
-			if board, ok = cdcIdentify(portName); ok {
-				break
-			}
-			logv("Bootloader identify attempt %d/%d on %s found nothing", attempt, bootloaderDiscoveryRetries, portName)
-			time.Sleep(time.Second)
-		}
-		if !ok {
-			logf(true, "No bootloader on %s after the reboot request, exiting.", portName)
-		}
-	}
-
-	switch board.Role {
-	case "BOOTLD-INVALID":
-		logf("[PATH] %s is bootloader with NO valid signed app installed (previous update failed, was rejected, or flash was tampered with) -> proceeding to flash a new image", portName)
-	case "BOOTLD":
-		logv("[PATH] %s is bootloader -> cdc transfer", portName)
-	default:
-		logf(true, "Unexpected role %q from %s, exiting.", board.Role, portName)
-	}
-
-	/* The COM port name is not an identity: the board re-enumerates after the
-	 * reboot request, and on a bench with several boards the name can come back
-	 * pointing at a different one. Refuse rather than flash a stranger. */
-	if want := strings.TrimSpace(l_config.UID); want != "" && !strings.EqualFold(want, board.UID) {
-		logf(true, "Device on %s reports uid=%s, not the configured target uid=%s. Refusing to flash.",
-			portName, board.UID, want)
-	}
-	logf("[PATH] target device UID=%s", board.UID)
-
-	runCDCAttempt(portName, filePath)
+	runUpload(cdcLink{port: portName}, filePath, CM_Flash)
 }
 
-// cdcIdentify asks the port who it is, using the same identity string the UDP
-// discovery reply carries. A board running the user's application never answers:
-// the sketch owns the CDC data pipe, so silence -- or anything the sketch echoes
-// back -- is what "the application is running" looks like from here.
-func cdcIdentify(portName string) (boardInfo, bool) {
-	port, err := openPort(portName, l_config.BaudRate)
+// cdcLink reaches a board over its USB port. Everything asked of a running
+// application goes at MagicBaud, which puts it in IAP mode; the bootloader
+// ignores the rate. So the sketch's Serial never sees an IAP command
+// (decision 176, $PROD/docs/modules/M1/IAP-PROTOCOL.md "USB 上的 IAP 模式").
+type cdcLink struct{ port string }
+
+func (l cdcLink) target() string { return l.port }
+
+func (l cdcLink) identify() (boardInfo, error) {
+	if board, err := cdcIdentify(l.port); err == nil {
+		return board, nil
+	}
+	// An older board package reboots the moment the port is set to 1200, so
+	// nothing answers: that reboot was the request. The bootloader it lands in
+	// reports no app version, so the version gate does not apply this time.
+	logv("No answer at %d baud on %s: older board package, it reboots on that rate", MagicBaud, l.port)
+	logv("Waiting %.1f seconds for the bootloader...", getRebootWaitDuration().Seconds())
+	time.Sleep(getRebootWaitDuration())
+	for attempt := 1; attempt <= bootloaderDiscoveryRetries; attempt++ {
+		board, err := cdcIdentify(l.port)
+		if err == nil {
+			return board, nil
+		}
+		logv("Identify attempt %d/%d on %s found nothing (%v)", attempt, bootloaderDiscoveryRetries, l.port, err)
+		time.Sleep(identifyRetryDelay)
+	}
+	return boardInfo{}, fmt.Errorf("No board answers on %s. If it runs this board package, its program did not "+
+		"answer in IAP mode: a loop() that runs long without delay() answers late.", l.port)
+}
+
+func (l cdcLink) requestReboot(id uploadIdentity) error {
+	port, err := openPort(l.port, MagicBaud)
 	if err != nil {
-		logv("Failed to open serial port %s with baud rate %d: %v", portName, l_config.BaudRate, err)
-		return boardInfo{}, false
+		return err
 	}
 	defer port.Close()
-
-	reply, err := SendCommandReadResponse(port, CM_PullIP, CommandTimeout)
+	s := serialSession{port}
+	err = authenticatedReboot(id,
+		func() (string, error) { return cdcAsk(s, CM_RebootChallenge, isNonceHex) },
+		func(cmd string) error { return s.write([]byte(cmd + "\n")) })
 	if err != nil {
-		return boardInfo{}, false
+		return err
 	}
-	return parseBoardInfoFromReply(reply, portName)
+	// Keep the port open until the board has gone: closing drops DTR, which
+	// ends IAP mode before a busy sketch has read the command.
+	if err := waitPortGone(l.port, getRebootWaitDuration()); err != nil {
+		logv("%v", err)
+	}
+	return nil
 }
 
-// The application reboots the moment it sees the port opened at MagicBaud, so
-// the open itself usually fails with the port already gone. That is the normal
-// outcome, not an error: a board that did not take the reset is reported by the
-// ping that follows.
-func triggerPortResetAndWait(portName string, wait time.Duration) {
-	if port, err := openPort(portName, MagicBaud); err == nil {
-		port.Close()
+func (l cdcLink) finder(uid string) *boardFinder {
+	return &boardFinder{
+		ip: l.port, uid: uid,
+		identify: func() (string, error) {
+			board, err := cdcIdentify(l.port)
+			return board.Raw, err
+		},
+		now:   time.Now,
+		sleep: time.Sleep,
 	}
-	logv("Reboot requested on %s@%d. Waiting %.1f seconds for the bootloader...",
-		portName, MagicBaud, wait.Seconds())
-	time.Sleep(wait)
-	logv("Reconnecting with default baud now.")
 }
 
-func runCDCAttempt(portName, filePath string) {
-	port, err := openPort(portName, l_config.BaudRate)
+func (l cdcLink) openSession(boardInfo) (session, error) {
+	port, err := openPort(l.port, l_config.BaudRate)
 	if err != nil {
-		logf(true, "Failed to open serial port %s with baud rate %d: %v", portName, l_config.BaudRate, err)
+		return nil, err
+	}
+	return serialSession{port}, nil
+}
+
+func (l cdcLink) resetSeen(boardInfo) (func(bool) bool, time.Duration) {
+	return usbResetSeen(func() bool { return serialPortPresent(l.port) }), cdcPresencePoll
+}
+
+// serialSession is a session over a serial port.
+type serialSession struct{ port serial.Port }
+
+func (s serialSession) write(b []byte) error {
+	_, err := s.port.Write(b)
+	return err
+}
+
+func (s serialSession) readSome(p []byte, wait time.Duration) (int, error) {
+	if err := s.port.SetReadTimeout(wait); err != nil {
+		return 0, err
+	}
+	return s.port.Read(p)
+}
+
+func (s serialSession) Close() error { return s.port.Close() }
+
+// cdcIdentify opens the port at MagicBaud and asks who is there: the
+// bootloader, or the application in IAP mode.
+func cdcIdentify(portName string) (boardInfo, error) {
+	port, err := openPort(portName, MagicBaud)
+	if err != nil {
+		return boardInfo{}, err
 	}
 	defer port.Close()
-
-	if err := claimIfUnclaimed(func(cmd string) (string, error) {
-		return SendCommandReadResponse(port, cmd, CommandTimeout)
-	}); err != nil {
-		logf(err, "Cannot claim this board")
-		return
-	}
-
-	id, err := resolveUploadIdentity()
-	if err != nil {
-		logf(err, "Cannot authenticate to this board")
-		return
-	}
-
-	logv("Proceeding with file transfer.")
-	checksum, fileSize, file := CalculateCRC32(filePath)
-	defer file.(io.Closer).Close()
-	logv("CRC Checksum: %x", checksum)
-
-	sigHex, err := signImageInMemory(filePath, id.key)
-	if err != nil {
-		logf(err, "Failed to prepare signature for %s", filePath)
-		return
-	}
-
-	if err := verifyIdentityMatchesDevice(id, func() (string, error) {
-		return SendCommandReadResponse(port, CM_GetPubKey, CommandTimeout)
-	}); err != nil {
-		logf(err, "Signing key check failed")
-		return
-	}
-
-	flashCmd, err := flashCommand(id, CM_Flash, fileSize, checksum, sigHex, func() (string, error) {
-		return SendCommandReadResponse(port, CM_AuthChallenge, CommandTimeout)
+	reply, err := cdcAsk(serialSession{port}, CM_PullIP, func(s string) bool {
+		_, ok := parseCDCIdentity(s, portName)
+		return ok
 	})
 	if err != nil {
-		logf(err, "Flash authorisation failed")
-		return
+		return boardInfo{}, err
 	}
-	if ok, reply := SendCommandWaitForResponse(port, flashCmd, Rsp_OK, FlashAckTimeout); !ok {
-		logf(true, "the board refused the flash command: %q", strings.TrimSpace(reply))
-	}
-
-	err = SendFile(port, portName, file, fileSize)
-	logf(err, "Upload failed")
+	board, _ := parseCDCIdentity(reply, portName)
+	return board, nil
 }
 
-// SendCommandWaitForResponse sends a command through the serial port,
-// waits for a specific response string, and returns true if received within
-// timeout, else false and whatever the board answered instead.
-//
-// The trailing "\n" frames the command so the bootloader knows where it
-// ends -- without it, a command longer than one USB CDC packet (e.g.
-// "flash ... <sig> <hmac>") can arrive split across multiple reads on the
-// device side with no way to tell it's still the same command.
-func SendCommandWaitForResponse(port serial.Port, command string, expected string, timeout time.Duration) (bool, string) {
-	if _, err := port.Write([]byte(command + "\n")); err != nil {
-		logf(err, "Failed to send command: %s", command)
-		return false, ""
+// cdcAsk sends one command and returns the first reply line accept takes.
+// Lines it does not take are skipped: what the sketch printed before IAP mode
+// is still in the board's send queue, and a slow loop() answers late enough
+// that "quiet for a while" is no end-of-reply signal. The bootloader ends a
+// reply without a newline, so a pending partial line counts once the port
+// has been quiet for replyIdleGap.
+func cdcAsk(s session, cmd string, accept func(string) bool) (string, error) {
+	if err := s.write([]byte(cmd + "\n")); err != nil {
+		return "", fmt.Errorf("failed to send command %q: %v", cmd, err)
 	}
-	logv("Send command: %s", command)
+	logv("Send command: %s", cmd)
 
-	port.SetReadTimeout(timeout)
-	return readUntil(port, expected, timeout)
+	chunk := make([]byte, 256)
+	pending := ""
+	for start := time.Now(); time.Since(start) < CommandTimeout; {
+		n, err := s.readSome(chunk, replyIdleGap)
+		if err != nil {
+			return "", fmt.Errorf("error reading from serial port: %v", err)
+		}
+		pending += string(chunk[:n])
+		for {
+			i := strings.IndexByte(pending, '\n')
+			if i < 0 {
+				break
+			}
+			line := strings.TrimSpace(pending[:i])
+			pending = pending[i+1:]
+			if accept(line) {
+				return line, nil
+			}
+		}
+		if n == 0 && accept(strings.TrimSpace(pending)) {
+			return strings.TrimSpace(pending), nil
+		}
+	}
+	return "", fmt.Errorf("no answer to %q", cmd)
+}
+
+// parseCDCIdentity parses the identity string in s, skipping whatever the
+// port carried before it.
+func parseCDCIdentity(s, portName string) (boardInfo, bool) {
+	if i := strings.LastIndex(s, deviceReplyPrefix+"_"); i > 0 {
+		s = s[i:]
+	}
+	return parseBoardInfoFromReply(s, portName)
+}
+
+// waitPortGone returns once portName has left the system's port list.
+func waitPortGone(portName string, timeout time.Duration) error {
+	for start := time.Now(); time.Since(start) < timeout; time.Sleep(cdcPresencePoll) {
+		if !serialPortPresent(portName) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s is still there %.0f s after the reboot request: the board did not accept it",
+		portName, timeout.Seconds())
+}
+
+// serialPortPresent reports whether the OS still lists the port. An
+// enumeration that fails says nothing, so it counts as present.
+func serialPortPresent(name string) bool {
+	ports, err := serialx.List()
+	if err != nil {
+		return true
+	}
+	for _, p := range ports {
+		if strings.EqualFold(p.Name, name) {
+			return true
+		}
+	}
+	return false
 }
