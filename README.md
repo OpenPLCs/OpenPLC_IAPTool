@@ -66,9 +66,10 @@ r||s) for anyone who needs the signature as a file, but uploading does not use
 them: the upload also has to sign a fresh challenge from the board, which needs
 the private key itself.
 
-The tool does not track firmware versions and does not compare them. An image
-that verifies against the key the board trusts is flashed, whatever it
-contains -- versioning an application is the author's business.
+Before flashing, the tool compares the sketch's own version
+(`OPENPLC_APP_VERSION`) with the one the board is running and refuses an older
+build; *Tools > Force flash* allows one older upload. This guards against
+mistakes, it is not a security control.
 
 ### Where the key comes from
 
