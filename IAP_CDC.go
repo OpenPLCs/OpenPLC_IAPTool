@@ -15,6 +15,26 @@ func openPort(comName string, baudRate int) (serial.Port, error) {
 	return serialx.Open(comName, baudRate)
 }
 
+// openIAPPort opens the port at MagicBaud so that the board sees the rate
+// change: Linux reopens a port at its last rate and then sends no
+// SET_LINE_CODING, so a plain open at 1200 after an earlier one leaves the
+// application out of IAP mode ($PROD/docs/modules/M1/IAP-PROTOCOL.md
+// "USB 上的 IAP 模式").
+func openIAPPort(comName string) (serial.Port, error) {
+	port, err := serialx.Open(comName, iapLeadInBaud)
+	if err != nil {
+		return nil, err
+	}
+	if err := port.SetMode(&serial.Mode{BaudRate: MagicBaud}); err != nil {
+		port.Close()
+		return nil, fmt.Errorf("cannot set %s to %d baud: %v", comName, MagicBaud, err)
+	}
+	return port, nil
+}
+
+// iapLeadInBaud is any rate other than MagicBaud.
+const iapLeadInBaud = 9600
+
 func RunCDC(portName, filePath string) {
 	runUpload(cdcLink{port: portName}, filePath, CM_Flash)
 }
@@ -50,7 +70,7 @@ func (l cdcLink) identify() (boardInfo, error) {
 }
 
 func (l cdcLink) requestReboot(id uploadIdentity) error {
-	port, err := openPort(l.port, MagicBaud)
+	port, err := openIAPPort(l.port)
 	if err != nil {
 		return err
 	}
@@ -114,7 +134,7 @@ func (s serialSession) Close() error { return s.port.Close() }
 // cdcIdentify opens the port at MagicBaud and asks who is there: the
 // bootloader, or the application in IAP mode.
 func cdcIdentify(portName string) (boardInfo, error) {
-	port, err := openPort(portName, MagicBaud)
+	port, err := openIAPPort(portName)
 	if err != nil {
 		return boardInfo{}, err
 	}
