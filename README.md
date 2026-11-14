@@ -35,12 +35,16 @@ IAPTool genkey [<name>]
 IAPTool pubkey [<key.pem>]
 IAPTool cert   [<leafPubHex>]          [--key=<root.pem>]
 
-IAPTool getowner <ip>
-IAPTool takeown  <ip> --key=<owner.pem>
-IAPTool setowner <ip> --current-key=<owner.pem> --new-key=<next.pem>
+IAPTool getowner      <board>
+IAPTool getapprevoked <board>
+IAPTool takeown       <board> --key=<owner.pem>
+IAPTool setowner      <board> --current-key=<owner.pem> --new-key=<next.pem> [--wipe]
+IAPTool revoke        <board> --key=<owner.pem> --leaf=<pubkey>
 
 IAPTool log      <ip>
 ```
+
+`<board>` is the board's IP address, or its USB port while it is in its bootloader.
 
 `log` prints the board's boot log over Ethernet (bootloader and system lines,
 kept across resets, lost on power-off), oldest first, as `<seq> <text>`. The
@@ -51,7 +55,8 @@ An upload (`cdc`, `ether`, `flashboot`) prints the target, a progress bar and th
 ## Firmware signing
 
 The bootloader only executes an image whose ECDSA P-256 signature verifies
-against the `fw_public_key[64]` baked into it (`IAPServer/fw_pubkey.c`), so
+against a certificate issued by the root the board trusts (its owner, recorded
+on the board when it is claimed; see [Board ownership](#board-ownership)), so
 every image has to be signed before it can be flashed. Signing is built in
 here -- no `openssl`, no shell scripts, nothing to `chmod +x`.
 
@@ -113,7 +118,7 @@ A certificate lives at `<the key it covers>.cert`, so a key and its
 certificate cannot be paired up wrongly, and the Arduino IDE finds it with no
 configuration for the same reason it finds the key. `--cert=<file>` overrides.
 
-Revoking one colleague is `IAPTool revoke --leaf=<their pubkey>`: that leaf is
+Revoking one colleague is `IAPTool revoke <board> --key=root.pem --leaf=<their pubkey>`: that leaf is
 refused from its next upload on, while firmware it already installed keeps
 running (`IAPTool getapprevoked` finds those boards). Handing the board to a new
 root (`IAPTool setowner`) retires every certificate the old root issued,

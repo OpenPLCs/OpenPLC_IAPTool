@@ -31,12 +31,16 @@ IAPTool genkey [<name>]
 IAPTool pubkey [<key.pem>]
 IAPTool cert   [<leafPubHex>]          [--key=<root.pem>]
 
-IAPTool getowner <ip>
-IAPTool takeown  <ip> --key=<owner.pem>
-IAPTool setowner <ip> --current-key=<owner.pem> --new-key=<next.pem>
+IAPTool getowner      <board>
+IAPTool getapprevoked <board>
+IAPTool takeown       <board> --key=<owner.pem>
+IAPTool setowner      <board> --current-key=<owner.pem> --new-key=<next.pem> [--wipe]
+IAPTool revoke        <board> --key=<owner.pem> --leaf=<pubkey>
 
 IAPTool log      <ip>
 ```
+
+`<board>` 是板子的 IP，或者板子在 bootloader 里时它的 USB 口。
 
 `log` 经网口打出板子的开机日志（bootloader 和系统行，复位后保留、断电清空），从旧到新，
 每行 `<序号> <文本>`。bootloader 和 app 都回答。
@@ -45,8 +49,8 @@ IAPTool log      <ip>
 
 ## 固件签名
 
-bootloader 只运行 ECDSA P-256 签名能用它内置的 `fw_public_key[64]`
-（`IAPServer/fw_pubkey.c`）验过的镜像，所以每个镜像烧录前都要先签名。
+bootloader 只运行 ECDSA P-256 签名能由它信任的根（板子的主人，认领时记在板子上，见[板子归属](#板子归属)）
+签发的证书验过的镜像，所以每个镜像烧录前都要先签名。
 签名功能就在这个工具里 —— 不用 `openssl`，不用 shell 脚本，也不用 `chmod +x`。
 
 ```sh
@@ -98,7 +102,7 @@ IAPTool ether app.bin 192.168.1.50           # 别的都不用改
 证书放在 `<它对应的密钥>.cert`，所以密钥和证书不会配错；Arduino IDE 不用任何配置
 就能找到它，道理和找到密钥一样。`--cert=<file>` 可以覆盖。
 
-撤销某位同事用 `IAPTool revoke --leaf=<他的公钥>`：这个叶证书从下一次上传起被拒绝，
+撤销某位同事用 `IAPTool revoke <board> --key=root.pem --leaf=<他的公钥>`：这个叶证书从下一次上传起被拒绝，
 它已经装上的固件继续运行（`IAPTool getapprevoked` 能找出这些板子）。把板子交给新的根
 （`IAPTool setowner`）会让旧根签发的所有证书失效，包括已经装上的固件。见
 `OpenPLC_Instruction/docs/modules/M2-ownership.md`。
