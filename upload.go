@@ -69,7 +69,7 @@ func runUpload(link boardLink, filePath, verb string) {
 	var id *uploadIdentity
 	switch role := strings.ToUpper(board.Role); role {
 	case "BOOTLD-INVALID":
-		logf("[PATH] %s is bootloader with NO valid signed app installed (previous update failed, was rejected, or flash was tampered with) -> proceeding to flash a new image", link.target())
+		logf("[PATH] %s is in its bootloader with no valid signed sketch (a new or factory-reset board, an update that was refused or interrupted, or damaged flash) -> uploading", link.target())
 	case "BOOTLD":
 		logv("[PATH] %s is bootloader -> transfer", link.target())
 	case "CUSAPP":
@@ -132,7 +132,9 @@ func transfer(link boardLink, board boardInfo, filePath, verb string, id *upload
 	logf(err, "Flash authorisation failed")
 	logv("Send command: %s", flashCmd)
 	if _, err := awaitOK(s, []byte(flashCmd+"\n"), FlashAckTimeout); err != nil {
-		logf(true, "the board refused the flash command: %v", err)
+		logf(true, "the board refused the flash command: %v\n"+
+			"  The board's log says why (IAPTool log <the board's IP>); a certificate whose key\n"+
+			"  was revoked is refused here.", err)
 	}
 
 	// Raw image bytes from here on: no "\n" framing, the board is now in its

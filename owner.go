@@ -169,7 +169,7 @@ func ownerReadState(ip string) (uint32, string, error) {
 	if key == noRootReply {
 		key = ""
 	} else if !pubKeyPattern.MatchString(key) {
-		return 0, "", fmt.Errorf("the board answered getpubkey with %q", key)
+		return 0, "", fmt.Errorf("the board answered getpubkey with %q: a running sketch answers only over the network; use the board's IP, or put it in its bootloader", key)
 	}
 	gen, err := strconv.ParseUint(strings.TrimSpace(genReply), 10, 32)
 	if err != nil {
@@ -263,7 +263,7 @@ func RunGetOwner(ip string) {
 	fmt.Println("Only firmware signed by that key, or by a key it certified, will start.")
 	fmt.Println()
 	fmt.Println("To hand this board to a different key:")
-	fmt.Println("  setowner      - signed by the current owner's key, no button needed")
+	fmt.Println("  setowner      - signed by the current owner's key, with the board in its bootloader")
 	fmt.Println("  factory reset - hold BOOT0 for 10 s; the next upload then claims it")
 }
 
@@ -469,5 +469,6 @@ func RunRevoke(ip, currentKeyPath, leafPubHex string) {
 		fmt.Println("That leaf was already revoked; nothing was written.")
 	}
 	fmt.Printf("Done. The board still trusts %s;\n", now)
-	fmt.Println("any firmware certified by the revoked leaf is refused from the next reset on.")
+	fmt.Println("the revoked leaf's next upload is refused; firmware it already installed keeps")
+	fmt.Println("running (IAPTool getapprevoked finds such boards).")
 }

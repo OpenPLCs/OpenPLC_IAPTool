@@ -274,10 +274,10 @@ func rebootFailureText(res rebootResult, ip, targetUID, keyPath string) string {
 	case res.state == rebootStillApp:
 		return fmt.Sprintf("%s (uid=%s) is still running its application after %d reboot request(s):\n"+
 			"  the board did not accept the reboot request. Either the key %s is not one\n"+
-			"  this board trusts, or the request was lost on the way.\n"+
-			"  To tell which: put the board in its bootloader (hold BOOT0 while it resets),\n"+
-			"  then `IAPTool getowner %s` shows which key it trusts.",
-			ip, targetUID, res.sent, keyPath, ip)
+			"  this board trusts (or its certificate was revoked), or the request was lost.\n"+
+			"  To tell which, while the sketch runs: `IAPTool getowner <the board's IP>` shows\n"+
+			"  which key it trusts, and `IAPTool log <the board's IP>` shows why it refused.",
+			ip, targetUID, res.sent, keyPath)
 	case res.state == rebootOtherBoard:
 		return fmt.Sprintf("%s now answers as a different board (uid=%s, expected %s); not uploading to it.",
 			ip, res.other, targetUID)

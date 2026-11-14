@@ -230,8 +230,10 @@ func generateSigningKey(path string) (*ecdsa.PrivateKey, error) {
 	}
 
 	fmt.Printf("Private key written to: %s\n", path)
-	fmt.Println("  Keep it safe and do not commit it. To upload from another computer, copy")
-	fmt.Println("  this file to the same place there.")
+	fmt.Println("  Keep it safe and do not commit it.")
+	if path == defaultKeyLocation() {
+		fmt.Println("  To upload from another computer, copy this file to the same place there.")
+	}
 	fmt.Printf("Public key: %s\n", publicKeyHex(&key.PublicKey))
 	return key, nil
 }

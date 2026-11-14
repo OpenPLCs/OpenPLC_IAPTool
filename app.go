@@ -74,12 +74,13 @@ const usageText = `Usage:
                    The first upload does the same by itself.
   IAPTool setowner <board> --current-key=<owner.pem> --new-key=<next.pem> [--wipe]
                    hands a claimed board over to another key. The handover is
-                   signed by the current owner, so no button is needed.
+                   signed by the current owner. The board must be in its bootloader.
   IAPTool revoke   <board> --key=<owner.pem> --leaf=<pubkey>
                    revokes one leaf (128-hex-char public key), signed by the
                    current owner. That leaf's next upload is refused; firmware
                    it already installed keeps running (see getapprevoked).
-                   No button is needed. The root itself can never be revoked.
+                   The board must be in its bootloader. The root itself can
+                   never be revoked.
 
   --key            ECDSA P-256 private key (PEM). When omitted, falls back to
                    "signing_key" in local_config.json, then to
