@@ -69,7 +69,7 @@ func runUpload(link boardLink, filePath, verb string) {
 	var id *uploadIdentity
 	switch role := strings.ToUpper(board.Role); role {
 	case "BOOTLD-INVALID":
-		logf("[PATH] %s is in its bootloader with no valid signed sketch (a new or factory-reset board, an update that was refused or interrupted, or damaged flash) -> uploading", link.target())
+		logf("[PATH] %s is in its bootloader with no valid signed sketch (a new or factory-reset board, a handover to another owner, or an interrupted flash write) -> uploading", link.target())
 	case "BOOTLD":
 		logv("[PATH] %s is bootloader -> transfer", link.target())
 	case "CUSAPP":

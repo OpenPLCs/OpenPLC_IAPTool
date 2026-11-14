@@ -155,7 +155,7 @@ func claimIfUnclaimed(exchange boardExchange) error {
 		return fmt.Errorf("the board refused the claim: %s", strings.TrimSpace(reply))
 	}
 	fmt.Printf("Claimed. From now on this board runs only firmware signed by %s\n", keyPath)
-	fmt.Println("  Losing that file means a factory reset (hold BOOT0 for 10 s) to reclaim the board.")
+	fmt.Println("  Losing that file means a factory reset to reclaim the board.")
 	return nil
 }
 

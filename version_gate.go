@@ -172,7 +172,8 @@ func checkVersionGate(binPath string, board boardInfo, found bool, force bool) {
 	}
 
 	logf(true, "this board already runs %s; the image you are uploading is %s, which is older.\n"+
-		"  To flash it anyway, set  Tools > Force flash (allow older version)  to \"Yes\".\n"+
+		"  To flash it anyway, set  Tools > Force flash (allow older version)  to \"Yes\"\n"+
+		"  (command line: --force).\n"+
 		"  That is one-shot: it is refused again until the menu goes back to \"No\".",
 		boardVer, imgVer)
 }

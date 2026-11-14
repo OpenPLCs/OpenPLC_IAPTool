@@ -66,7 +66,8 @@ func (l cdcLink) identify() (boardInfo, error) {
 		time.Sleep(identifyRetryDelay)
 	}
 	return boardInfo{}, fmt.Errorf("No board answers on %s. If it runs this board package, its program did not "+
-		"answer in IAP mode: a loop() that runs long without delay() answers late.", l.port)
+		"answer: it answers only between loop() calls and inside delay(). Enter the bootloader by "+
+		"hand and upload again.", l.port)
 }
 
 func (l cdcLink) requestReboot(id uploadIdentity) error {

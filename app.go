@@ -106,8 +106,9 @@ const usageText = `Usage:
                    a progress bar and the verdict. The Arduino IDE passes it
                    when "Show verbose output during upload" is ticked.
 
-A factory reset (hold BOOT0 for 10 s) makes a board forget its root; the next
-upload claims it again.`
+A factory reset makes a board forget its root; the next upload claims it again.
+To do it: reset the board, press BOOT0 while LED3 blinks, hold it until LED3
+stays lit, then release.`
 
 func main() {
 	args, err := parseSigningFlags(os.Args[1:])

@@ -264,7 +264,8 @@ func RunGetOwner(ip string) {
 	fmt.Println()
 	fmt.Println("To hand this board to a different key:")
 	fmt.Println("  setowner      - signed by the current owner's key, with the board in its bootloader")
-	fmt.Println("  factory reset - hold BOOT0 for 10 s; the next upload then claims it")
+	fmt.Println("  factory reset - reset the board, press BOOT0 while LED3 blinks, hold it until")
+	fmt.Println("                  LED3 stays lit, then release; the next upload claims it")
 }
 
 // RunGetAppRevoked reports whether the image installed on this board was
@@ -306,14 +307,15 @@ func RunTakeOwn(ip, keyPath string) {
 	logf(err, "cannot read this board's ownership state")
 	if was != "" {
 		logf(true, "This board already trusts %s...\n"+
-			"Hand it over with setowner and the current owner's key, or factory-reset it\n"+
-			"(hold BOOT0 for 10 s) and claim it again.", was[:32])
+			"Hand it over with setowner and the current owner's key, or factory-reset it and\n"+
+			"claim it again.", was[:32])
 	}
 
 	fmt.Println("Claiming this board for:")
 	fmt.Printf("  %s\n", pub)
 	fmt.Println("From then on it runs only firmware signed by that key. The way back is a")
-	fmt.Println("factory reset: hold BOOT0 for 10 s.")
+	fmt.Println("factory reset: reset the board, press BOOT0 while LED3 blinks, hold it until")
+	fmt.Println("LED3 stays lit, then release.")
 	fmt.Println()
 
 	reply, err := ownerCommand(ip, "takeown "+pub)
@@ -402,6 +404,8 @@ func RunSetOwner(ip, currentKeyPath, newKeyPath string, wipe bool) {
 		logf(true, "The board answered OK but reports generation %d and key %s", gotGen, now)
 	}
 	fmt.Printf("Done. Generation %d, and the board now runs only firmware signed by %s.\n", gotGen, newKeyPath)
+	fmt.Println("The sketch on it was signed under the old owner and does not start after the next")
+	fmt.Println("reset: upload it again with the new key.")
 }
 
 // RunRevoke revokes one leaf, named by its public key, signed by the current
